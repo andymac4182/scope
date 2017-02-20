@@ -1,102 +1,62 @@
-const db = require('./db')
-const getOpenIssues = require('./getOpenIssues')
-const getClosedIssues = require('./getClosedIssues')
-const CLOSED_ITEMS_TABLE = process.env.CLOSED_ITEMS_TABLE
-const OPEN_ITEMS_TABLE = process.env.OPEN_ITEMS_TABLE
+const awsSdk = require('aws-sdk')
+const IssuesBucket = process.env.IssuesBucket
+const DEBUG = process.env.DEBUG
 
 module.exports = function tearDown(event, context, callback) {
-  // Batch delete items from both tables
-  deleteOpenIssues((err, data) => {
-    if (err) return callback(err)
-    deleteClosedIssues((e, response) => {
-      if (e) return callback(e)
-      // sucess return complete
-      return callback(null, {
-        statusCode: 200,
-        body: JSON.stringify({
-          teardown: 'complete',
-          open: data,
-          completed: response
-        }),
-      })
-    })
-  })
+  listAllObjects()
+  deleteAllObjects()
 }
 
-function deleteOpenIssues(callback) {
-  getOpenIssues(null, null, function(err, data) {
-    if (err) return callback(err)
 
-    const items = JSON.parse(data.body).items
-    handleBatchDeletes(OPEN_ITEMS_TABLE, items, function(e, data) {
-      if (e) return callback(e)
-      // return success
-      return callback(null, items.length)
-    })
-  })
-}
+const keysToDelete = []
 
-function deleteClosedIssues(callback) {
-  getClosedIssues(null, null, function(err, data) {
-    if (err) return callback(err)
-
-    const items = JSON.parse(data.body).items
-    console.log('completed items found', items.length)
-    handleBatchDeletes(CLOSED_ITEMS_TABLE, items, function(e, data) {
-      if (e) return callback(e)
-      // return success
-      return callback(null, items.length)
-    })
-  })
-}
-
-/* batchUpdate loop for Dyanmo bulk modifications */
-function handleBatchDeletes(tableName, items, callback) {
-  if (!items.length) {
-    callback()
-  }
-  const deleteItems = formatDynamoBatchDelete(items)
-  // chunk items into 25 item arrays (Dynamo batch limit batchWrite)
-  const batches = chunk(deleteItems, 25)
+function listAllObjects(continuationToken) {
   var params = {
-    RequestItems: {},
-    ReturnConsumedCapacity: "NONE",
-    ReturnItemCollectionMetrics: "NONE"
+    Bucket: IssuesBucket,
+    MaxKeys: 1000,
   }
-  var returnData = []
-  var count = 0
-  batches.forEach((batch, i) => {
-    params.RequestItems[tableName] = batch
-    db.batchWrite(params, function(error, data) {
-      if (error) return callback(error)
-      console.log(`batch #${i} complete. ${batch.length} items removed from DB`)
-      count++
-      if (count === batches.length) {
-        // last batch, callback and finish
-        callback()
-      }
-    })
-  })
-}
 
-/* Format dynamoDBItems for batch deletion  */
-function formatDynamoBatchDelete(dynamoDBItems) {
-  return dynamoDBItems.map((item)=> {
-    return {
-      DeleteRequest: {
-        Key: {
-          number: item.number
-        }
-      }
+  if (typeof(continuationToken) !== 'undefined') {
+    params.ContinuationToken = continuationToken
+  }
+
+  s3.listObjectsV2(params, function(err, data) {
+    if (err) {
+      console.log(err, err.stack); // an error occurred
+      return
     }
-  })
+    const newKeys = data.Contents.map(k => k.Key)
+    Array.prototype.push.apply(keysToDelete, newKeys);
+    if (data.IsTruncated) {
+      listAllObjects(data.NextContinuationToken)
+    }
+  });
 }
 
-// array chunk util
+function deleteAllObjects() {
+  const batchesToDelete = chunk(keysToDelete, 999)
+  batchesToDelete.map(k => deleteObjects(k))
+}
+
+function deleteObjects(keys) {
+  var params = {
+    Bucket: IssuesBucket,
+    Delete: {
+      Objects: [keys.map(k => { Key: k })],
+      Quiet: true
+    },
+    MFA: 'STRING_VALUE',
+    RequestPayer: 'requester'
+  };
+  s3.deleteObjects(params, function(err, data) {
+    if (err) console.log(err, err.stack); // an error occurred
+    else     console.log(data);           // successful response
+  });
+}
+
 function chunk(array, size) {
   var results = [];
   while (array.length) {
     results.push(array.splice(0, size));
   }
-  return results;
 }

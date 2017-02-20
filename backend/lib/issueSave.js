@@ -1,10 +1,11 @@
 /**
- * Save github issue in DynamoDB
+ * Save github issue in S3
  */
-const db = require('./db')
-const CLOSED_ITEMS_TABLE = process.env.CLOSED_ITEMS_TABLE
-const OPEN_ITEMS_TABLE = process.env.OPEN_ITEMS_TABLE
+const awsSdk = require('aws-sdk')
+const IssuesBucket = process.env.IssuesBucket
 const DEBUG = process.env.DEBUG
+
+const s3 = new AWS.S3();
 
 module.exports = function saveSingleIssue(issue, callback) {
   if (issue.state === 'closed' || issue.closed_at) {
@@ -18,23 +19,24 @@ module.exports = function saveSingleIssue(issue, callback) {
 
 function saveClosedIssue(issue, callback) {
   console.log('Issue or PR closed. Remove from DB')
-  db.delete({
-    TableName: OPEN_ITEMS_TABLE,
-    Key: {
-      number: issue.number
-    },
-  }, (err, resp) => {
+  const deletedParams = {
+    Bucket: IssuesBucket,
+    Key: `open/${issue.number}`,
+  }
+  s3.deleteObject(deletedParams, function(err, deleteData) {
     if (err) return callback(err)
     if (DEBUG) {
-      console.log(`issue ${issue.number} deleted from ${OPEN_ITEMS_TABLE} Table`, resp)
+      console.log(`issue ${issue.number} deleted from ${IssuesBucket} Bucket`, deleteData)
     }
-    db.put({
-      TableName: CLOSED_ITEMS_TABLE,
-      Item: issue
-    }, function(error, response) {
+    const putParams = {
+      Bucket: IssuesBucket,
+      Key: `closed/${issue.number}`,
+      Body: JSON.stringify(issue),
+    }
+    s3.putObject(putParams, function(err, putData) {
       if (error) return callback(error)
       if (DEBUG) {
-        console.log(`issue ${issue.number} added to ${CLOSED_ITEMS_TABLE} Table`, response)
+        console.log(`issue ${issue.number} added to ${IssuesBucket} Bucket`, putData)
       }
       return callback(null, {
         statusCode: 200,
@@ -47,32 +49,30 @@ function saveClosedIssue(issue, callback) {
 }
 
 function saveOpenIssue(issue, callback) {
-  // add or update item in database
-  db.put({
-    TableName: OPEN_ITEMS_TABLE,
-    Item: issue
-  }, (err, resp) => {
-    if (err) return callback(err)
+  const putParams = {
+    Bucket: IssuesBucket,
+    Key: `closed/${issue.number}`,
+    Body: JSON.stringify(issue),
+  }
+  s3.putObject(putParams, function(err, putData) {
+    if (error) return callback(error)
     if (DEBUG) {
-      console.log(`issue ${issue.number} added to ${OPEN_ITEMS_TABLE} Table`, resp)
+      console.log(`issue ${issue.number} added to ${IssuesBucket} Bucket`, putData)
     }
-    // Delete from closed table if it's being reopened
-    db.delete({
-      TableName: CLOSED_ITEMS_TABLE,
-      Key: {
-        number: issue.number
-      }
-    }, function(err, response) {
+    const deletedParams = {
+      Bucket: IssuesBucket,
+      Key: `open/${issue.number}`,
+    }
+    s3.deleteObject(deletedParams, function(err, deleteData) {
       if (err) return callback(err)
       if (DEBUG) {
-        console.log(`issue ${issue.number} deleted from ${CLOSED_ITEMS_TABLE} Table`, response)
+        console.log(`issue ${issue.number} deleted from ${IssuesBucket} Bucket`, deleteData)
       }
-
       return callback(null, {
         statusCode: 200,
         body: JSON.stringify({
           input: response,
-        })
+        }),
       })
     })
   })
